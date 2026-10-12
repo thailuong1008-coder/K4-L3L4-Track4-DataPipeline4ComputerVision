@@ -4,10 +4,10 @@
 
 | | |
 |---|---|
-| Họ và tên | `<điền>` |
-| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `<điền>` |
-| GitHub | `<điền: tên tài khoản>` |
-| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `<điền: trip-xxxxx>` |
+| Họ và tên | `Nguyễn Thái Lương` |
+| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `2A202602932` |
+| GitHub | `thailuong1008-coder` |
+| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `trip-04622` |
 
 ## Kết quả cuối
 
@@ -21,7 +21,15 @@
 ### Câu 1
 Liệt kê **ít nhất 4 khác biệt** giữa telemetry nguồn A và nguồn B mà bạn thấy ở bronze. Vì sao pipeline giữ **mỗi nguồn một bảng bronze** và để mọi cột ở dạng chữ, thay vì gộp và ép kiểu ngay?
 
-(trả lời ở đây)
+Năm khác biệt cụ thể giữa `bronze.raw_telemetry_a` (3021 dòng, `_batch_id = 17f098d6bbb1`) và `bronze.raw_telemetry_b` (3234 dòng, `_batch_id = 844e983d0ded`):
+1. **Tên các cột (schema drift)**: Nguồn A dùng `ts_utc, speed_mps, heading_deg, lat, lon, alt_m, acc_x, acc_y, gas, brake, steer`; trong khi nguồn B dùng `timestamp_ms, spd_kmh, hdg, latitude, longitude, altitude, ax, ay, throttle_pct, brake_pct, steering`.
+2. **Đơn vị tốc độ**: Nguồn A ghi bằng **m/s** (ví dụ dòng đầu `speed_mps = 1.213`), còn nguồn B ghi bằng **km/h** (ví dụ dòng đầu `spd_kmh = 55.11`, cần chia `3.6` mới ra m/s).
+3. **Định dạng thời gian**: Nguồn A lưu chuỗi chuẩn **ISO 8601 UTC** (`2025-10-07T08:00:00.014Z`), còn nguồn B lưu số nguyên **epoch milliseconds** (`1759933801509`).
+4. **Đơn vị bàn đạp ga/phanh**: Nguồn A chuẩn hoá trong thang tỷ lệ `[0, 1]` (`gas = 0.028`, `brake = 0.000`), còn nguồn B lưu theo phần trăm `[0, 100]` (`throttle_pct = 2.0`, `brake_pct = 0.0`).
+5. **Độ lệch đồng hồ thiết bị (`telemetry_clock_offset_ms`)**: Trong `bronze.video_files`, `drive_a` có offset `0 ms`, còn đồng hồ telemetry của `drive_b` chạy nhanh hơn đồng hồ video `1500 ms` (dòng đầu `1759933801509` tương ứng `14:30:01.509 UTC`, trong khi video bắt đầu lúc `14:30:00+00:00`).
+
+Pipeline tách mỗi nguồn một bảng Bronze riêng và giữ mọi cột ở dạng chuỗi (`string`) vì nguyên tắc cốt lõi của lớp Bronze là **append-only, giữ nguyên bản dữ liệu gốc (schema-on-read)**. Nếu gộp và ép kiểu (`CAST`) ngay lúc ingest, bất kỳ sự thay đổi schema (schema drift) hoặc dòng dữ liệu bẩn/rỗng nào từ cảm biến cũng sẽ làm sập quá trình nạp hoặc làm mất dữ liệu gốc không thể khôi phục; giữ nguyên dạng text kèm cột lineage (`_batch_id`, `_row_no`) giúp ta luôn có thể sửa logic parse ở lớp Silver và chạy lại từ Bronze mà không cần thu thập lại dữ liệu.
+
 
 ## Bước 2 · Silver telemetry
 
