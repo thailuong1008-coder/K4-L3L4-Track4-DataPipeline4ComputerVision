@@ -124,21 +124,52 @@ Theo mục `lineage` và `rules` trong `s3://lake/gold/datasets/a63c8ed25319/man
 ### Câu 9
 Mô tả chính xác điều xảy ra khi trip của bạn sập rồi chạy lại: bao nhiêu task chuyển đỏ, bao nhiêu task `upstream_failed`, bạn clear gì, dữ liệu có nhân đôi không, `dataset_version` có đổi không? Bằng chứng (ảnh, số) là gì?
 
-(trả lời ở đây)
+- **Khi đặt `LAB_FAIL_ONCE=trip-04622` và chạy DAG `day09_video_pipeline` (`run_crash_recovery`)**:
+  - Có đúng **`1` task chuyển đỏ (`failed`)**: `silver_frames` tại **`map_index = 12`** (tương ứng `trip-04622`), trong khi `25/26` task `silver_frames` còn lại và `4` task đầu nguồn (`bronze_drive_a`, `bronze_drive_b`, `bronze_trips`, `trip_commands`) đều xanh (`29` task `success`).
+  - Có đúng **`7` task phía sau chuyển sang `upstream_failed` (màu cam)**: `dbt_run_silver`, `dbt_test_silver`, `dbt_run_gold`, `dbt_test_gold`, `publish_lake`, `export_dataset`, `publish_warehouse` — dữ liệu chưa đầy đủ bị chặn lại, không đi tiếp.
+- **Thao tác khôi phục (Clear) và kết quả**:
+  - Tôi chỉ **Clear đúng task đỏ `silver_frames[12]` (`trip-04622`) kèm 7 task downstream** của nó: chỉ `1` partition `trip-04622` chạy lại (`try_number = 2`) và `7` task phía sau chạy tiếp; `25` trip đã thành công không phải giải mã lại từ đầu.
+  - **Dữ liệu không bị nhân đôi** và **`dataset_version` không đổi**: Bảng `silver.frames` vẫn giữ đúng `1246` khung hình, `gold.gold_dataset_frames` giữ đúng `1019` khung hình (`655/192/172`), `dataset_version` vẫn là **`a63c8ed25319`**, và `verify` đạt tuyệt đối **`27/27 checks passed`**.
+  - **Bằng chứng**: Ảnh chụp `report/screenshots/airflow_crash_log.png` (hiển thị rõ `Task: silver_frames [] | Map Index: 12` và dòng log đỏ `RuntimeError: simulated crash while extracting trip-04622; run it again` cùng 7 ô cam `upstream_failed` bên trái) và ảnh `report/screenshots/airflow_graph.png` (toàn bộ 37 task instances chuyển xanh hoàn toàn sau khi clear).
 
 ### Câu 10
 Nâng từ 2 drive lên **500 xe mỗi ngày**: ba thành phần nào của pipeline này sẽ vỡ đầu tiên, và bạn thay bằng gì (nối với slide 12, 22, 23)?
 
-(trả lời ở đây)
+Khi mở rộng từ 2 drive (~27 MB video, ~6200 dòng telemetry) lên **500 xe mỗi ngày** (hàng chục TB video 7 camera và hàng tỷ bản ghi cảm biến mỗi ngày), **3 thành phần sẽ vỡ đầu tiên** gồm:
+1. **Giải mã và trích xuất video (`pipeline/frames.py` chạy FFmpeg CPU tuần tự + tải nguyên file `raw.mp4` về từng worker)**: Ở bước `extract_trip`, mỗi trip đều tải lại toàn bộ file video của drive từ S3 về ổ tạm rồi chạy FFmpeg trên CPU với `LocalExecutor` (`max_active_tis_per_dagrun=1`). Với 500 xe/ngày, băng thông mạng S3 và CPU một máy sẽ nghẽn cổ chai ngay lập tức. **Thay bằng (Slide 12, 23)**: Cắt chunk video hoặc đọc theo byte-range/streaming trực tiếp tại biên (edge) hoặc dùng cụm worker phân tán có GPU tăng tốc phần cứng (**NVIDIA NVDEC / Ray Data / Spark / KubernetesExecutor**) để decode song song.
+2. **Engine xử lý dữ liệu đơn máy (`DuckDB` lưu trên một file `/opt/work/lakehouse.duckdb`)**: DuckDB là in-process OLAP cực nhanh trên một node cho dữ liệu vừa và nhỏ, nhưng không hỗ trợ ghi đồng thời từ nhiều máy (single-writer lock trên file `.duckdb`) và sẽ tràn RAM/ổ đĩa khi join ASOF hàng tỷ dòng telemetry với hàng trăm triệu khung hình. **Thay bằng (Slide 22, 23)**: Chuyển sang engine tính toán phân tán như **Apache Spark / Databricks (dbt-spark)** hoặc **Trino / ClickHouse** đọc/ghi trực tiếp trên Delta Lake phân vùng theo `date / drive_id`.
+3. **Cách nạp telemetry theo file CSV batch thủ công & kho phục vụ (`publish_warehouse` copy nguyên bảng bằng `CREATE OR REPLACE TABLE` sang Postgres)**: Với 500 xe gửi telemetry liên tục, việc gom file CSV và ghi đè toàn bộ bảng mart sang một instance Postgres đơn lẻ sẽ làm treo I/O. **Thay bằng (Slide 12, 22)**: Dùng luồng ingestion thời gian thực (**Kafka / Redpanda + Spark Structured Streaming / Flink**) ghi incremental vào Delta Lake, và dùng dbt **incremental models** kết hợp warehouse phân tán (ClickHouse / BigQuery / Snowflake) hoặc truy vấn trực tiếp Lakehouse qua Trino.
 
 ## Câu hỏi riêng của bạn trên Metabase
 
 Câu SQL bạn thêm vào dashboard và điều nó cho biết:
 
-(trả lời ở đây)
+```sql
+SELECT
+    drive_id,
+    trip_id,
+    lighting,
+    conditions,
+    frames AS total_frames,
+    frames_kept,
+    (frames - frames_kept) AS frames_dropped,
+    ROUND(100.0 * (frames - frames_kept) / NULLIF(frames, 0), 1) AS drop_rate_pct,
+    avg_speed_kmh,
+    split
+FROM marts.mart_trip_summary
+ORDER BY drop_rate_pct DESC, frames_dropped DESC;
+```
+
+**Ý nghĩa và kết quả phân tích vận hành**:
+- Câu truy vấn xếp hạng các trip theo **tỷ lệ khung hình bị loại (`drop_rate_pct`)** để tìm ra chuyến đi nào hao hụt dữ liệu nhiều nhất và đối chiếu với tốc độ trung bình (`avg_speed_kmh`).
+- Kết quả cho thấy **`trip-04622` (`drive_a`)** có tỷ lệ bị loại cao nhất toàn bộ dữ liệu: **`56,7%`** (bị loại `34/60` khung, chỉ giữ lại `26` khung, hoàn toàn do cờ `is_near_dup` từ đoạn camera bị đứng hình 6 giây), tiếp theo là `trip-03904` (`50,0%`, loại `11/22` khung) và `trip-02086` (`46,7%`, loại `28/60` khung khi xe đi chậm `17,6 km/h`) và `trip-08888` (`40,0%`, loại `24/60` khung khi xe bò chậm `6,5 km/h`).
+- Nhìn tổng thể, `drive_a` có tỷ lệ khung bị loại cao hơn hẳn `drive_b` (`27,6%` so với `9,5%`) vì `drive_a` vừa gặp sự cố đứng hình camera, vừa có nhiều đoạn chạy chậm trong đô thị làm sinh ra nhiều khung hình gần trùng (`near-duplicate`).
 
 ## Nhìn lại
 
 Điều bạn thấy bất ngờ nhất, điều gì còn chưa rõ, và một lỗi dữ liệu mà bạn nghĩ pipeline **chưa** bắt được (nếu có). Tối đa 8 dòng.
 
-(trả lời ở đây)
+- **Điều bất ngờ nhất**: Chỉ với các tín hiệu thị giác cực nhẹ không cần mô hình học sâu (độ sáng trung bình `luma`, phương sai Laplacian `blur_score`, và băm 64-bit `dHash`), kết hợp với `ASOF JOIN` theo event time và giao dịch ACID của Delta Lake, pipeline đã tự động bắt chính xác 100% khung đen, khung mờ, camera đứng hình và chống rò rỉ dữ liệu (`0/26` trip bị cắt ngang so với `26/26` khi chia theo frame).
+- **Điều còn muốn tìm hiểu thêm**: Cách tự động điều chỉnh ngưỡng `dup_hamming` hoặc tần số lấy mẫu `SAMPLE_FPS` phụ thuộc vào vận tốc thực tế (`speed_mps`) để không lấy dư khung khi xe dừng đèn đỏ mà vẫn lấy đủ dày khi xe vào cua tốc độ cao.
+- **Một lỗi dữ liệu mà pipeline hiện tại chưa bắt được**: Nếu camera bị **lệch góc lắp đặt (camera miscalibration/occlusion một phần)** như bị bám bùn đất một góc kính, bị lóa nắng ngược sáng cục bộ (glare), hoặc **telemetry bị kẹt giá trị hợp lệ (stuck sensor)** (ví dụ cảm biến tốc độ bị treo ở đúng `15.0 m/s` suốt 30 giây), thì cả độ sáng trung bình, độ nét toàn ảnh lẫn kiểm tra `in_range(0..70 m/s)` đều vẫn báo PASS dù nhãn huấn luyện đã bị sai lệch.
+
