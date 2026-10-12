@@ -11,8 +11,8 @@
 
 ## Kết quả cuối
 
-- `dataset_version` của bạn: `<điền>`  (phải khớp `report/evidence/run_summary.json`)
-- Số khung hình train / val / test của bạn: `<điền>`
+- `dataset_version` của bạn: `a63c8ed25319`  (phải khớp `report/evidence/run_summary.json`)
+- Số khung hình train / val / test của bạn: `655 / 192 / 172` (tổng `1019` khung hình từ `26` trip: `18` trip train, `4` trip val, `4` trip test; `drive_a = 436` khung, `drive_b = 583` khung)
 - `report/verify.txt`: tạo bằng `python3 scripts/check_submission.py --save-verify` (phải có `27/27 checks passed`).
 - Ảnh chụp trong `report/screenshots/`: `airflow_graph.png`, `minio_lake.png`, `metabase_dashboard.png`, và ảnh bài tập sập/chạy lại (log task đỏ thấy trip của bạn).
 
@@ -94,17 +94,30 @@ Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline x
 ### Câu 6
 Dựa vào `leakage.json`: chia theo khung hình làm bao nhiêu trip bị chia cắt, so với chia theo trip? Vì sao điều này làm điểm kiểm thử đẹp một cách giả tạo?
 
-(trả lời ở đây)
+- **Số liệu từ `leakage.json`** (trên tổng số **`1019` khung hình** hợp lệ thuộc **`26` trip**):
+  - Khi chia ngẫu nhiên **theo khung hình** (`per-frame split` theo tỷ lệ 70/15/15): Có tới **`26/26` trip** nằm ở nhiều hơn một split (`per_frame_split_trips_straddling = 26`), và cả **`26/26` trip** đều có khung hình xuất hiện đồng thời ở cả tập `train` lẫn tập `test` (`per_frame_split_trips_in_both_train_and_test = 26`).
+  - Khi chia **theo trip** (`per-trip split` ở bảng `gold.gold_dataset_frames` của pipeline): Có **`0` trip** bị chia cắt (`per_trip_split_trips_straddling = 0`), mỗi trip chỉ thuộc duy nhất một trong ba tập (`train = 18` trip, `val = 4` trip, `test = 4` trip).
+- **Vì sao làm điểm kiểm thử đẹp một cách giả tạo (Data Leakage)**: Video được lấy mẫu `2 fps` (hai khung liên tiếp chỉ cách nhau `0,5 giây`), nên các khung hình kế cận trong cùng một trip có bối cảnh nền, điều kiện ánh sáng, thời tiết, mặt đường và vận tốc gần như giống hệt nhau. Nếu chia theo khung hình, khung tại giây `t` vào `train` còn khung tại `t + 0.5s` vào `test`; mô hình chỉ cần học thuộc lòng (memorize) đặc trưng cảnh cụ thể thay vì học quy luật tổng quát mà vẫn đạt độ chính xác rất cao trên tập `test`, nhưng khi đem ra xe chạy thực tế ở tuyến đường/cảnh mới thì chất lượng sụp đổ.
 
 ### Câu 7
 Vì sao `dataset_version` là **băm nội dung** chứ không phải ngày giờ hay số đếm? Hai lần chạy liên tiếp cho kết quả gì? Vì sao `dataset_version` của bạn **khác** bạn bè dù cùng dữ liệu (liên hệ MSSV)?
 
-(trả lời ở đây)
+- **Vì sao `dataset_version` là băm nội dung (content-addressed hash)**: Trong `pipeline/publish.py`, `dataset_version` được tính bằng `sha256("\n".join(f"{frame_id}|{split}" ...))[:12]`. Dùng băm nội dung đảm bảo **tính tất định (deterministic) và bất biến**: cùng một tập khung hình và nhãn split sẽ luôn sinh ra đúng một mã phiên bản duy nhất bất kể chạy vào ngày giờ nào hay chạy lại bao nhiêu lần (khác với timestamp mỗi lần chạy sinh một thư mục mới gây rác, hoặc số đếm tự tăng phụ thuộc vào trạng thái ngoài).
+- **Kết quả hai lần chạy liên tiếp**: Khi chạy `step 4` và chạy lại `cli export-dataset` liên tiếp, cả hai lần đều trả về cùng một `dataset_version = a63c8ed25319` và cùng `manifest_sha256 = de2ce2276fe55449f1378b1c819927679bef63e76a2e65964e00448ae999b468`.
+- **Vì sao khác bạn bè dù cùng dữ liệu**: Trong `gold_dataset_frames.sql`, thứ tự các trip trước khi gán `train/val/test` được sắp xếp theo `md5(trip_id || '{{ env_var("LAB_STUDENT_ID", "") }}')`. Với `LAB_STUDENT_ID = 2A202602932`, hàm băm MD5 tạo ra một hoán vị thứ tự trip riêng biệt của tôi (`train: 655`, `val: 192`, `test: 172` khung), dẫn đến chuỗi ghép `frame_id|split` khác với các bạn có MSSV khác và sinh ra `dataset_version = a63c8ed25319` duy nhất cho MSSV của tôi.
 
 ### Câu 8
 Đọc phần `lineage` trong `manifest.json` của dataset bạn. Trả lời "dataset này được tạo từ dữ liệu nào?" bằng chính nội dung đó. Nếu một người hỏi 3 tháng sau, thông tin nào giúp tái tạo lại đúng dataset này?
 
-(trả lời ở đây)
+Theo mục `lineage` và `rules` trong `s3://lake/gold/datasets/a63c8ed25319/manifest.json`, dataset `a63c8ed25319` (`1019` khung hình: `436` khung từ `drive_a`, `583` khung từ `drive_b`) được tạo từ:
+- **Hai file video gốc (kiểm chứng bằng SHA-256)**:
+  - `drive_a`: `636ba1a98dfc5ba665d1c935e1d2064e69f4df360ff9ffbd15795957d5e7e9aa`
+  - `drive_b`: `bfa62703f645ff77a8578ae3fc74a00881140d38a404d43c8e2af265bbee9fdc`
+- **Phiên bản (commit version) cụ thể của các bảng Delta thượng nguồn**:
+  - Lớp Bronze: `bronze.raw_telemetry_a` (version `0`), `bronze.raw_telemetry_b` (version `0`), `bronze.trips_raw` (version `0`), `bronze.video_files` (version `1`).
+  - Lớp Silver: `silver.frames` (version `25` khi chạy mới toàn bộ 26 trip từ `0..25`, hoặc version `27` sau 2 lần chạy lại ở thí nghiệm idempotency), `silver.telemetry` (version `0`), `silver.frames_flagged` (version `0`), `silver.frame_telemetry` (version `0`).
+- **Làm sao tái tạo lại đúng dataset này sau 3 tháng**: Nhờ tính năng **Delta Time Travel** kết hợp với `manifest.json`, ta chỉ cần: (1) đối chiếu SHA-256 của video đầu vào, (2) truy vấn đúng số `version` của các bảng Delta trong `lineage`, và (3) áp dụng lại đúng tập luật `rules` (`drop: ["is_black", "is_blurry", "is_near_dup", "not sync_ok"]`, `split: "per trip, stratified by drive, md5 order"` với `LAB_STUDENT_ID = 2A202602932`) là sẽ thu lại chính xác `1019` khung hình có `dataset_version = a63c8ed25319`.
+
 
 ## Bước 5 · Điều phối và phục vụ
 
